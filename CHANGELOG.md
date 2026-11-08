@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — review fixes
+
+- A crash in a background thread also prints the full traceback to stderr (`docker logs`), not only to the JSONL file
+- JSONL log: a write error (disk full, unwritable dir) pauses the file log and retries every 60 s instead of
+  disabling it until restart; `/api/diag` has a `log_sink` section (broken, since, last error, lost events)
+- `/api/client-log`: server-side limit of 30 reports per 10 minutes (HTTP 429 above it); the next accepted report
+  carries `refused_before`, so a flooding client cannot push job history out of the rotated log
+- Tool caches (`graft/.cache/`, `.trail/cache/`) are no longer tracked
+
 ## Unreleased — resource priorities
 
 - `compose.example.yml`: low CPU and disk priority (`cpu_shares: 256`, `blkio_config.weight: 100`) so Plex and other

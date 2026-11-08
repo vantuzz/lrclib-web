@@ -196,3 +196,25 @@ def test_read_events_tail_and_error_window(tmp_path):
     assert errs and all(e["level"] == "error" for e in errs)
     assert diaglog.read_events(paths, 500, 10**6, only_errors_since=10**11) == []
     bus.sink.close()
+
+
+def test_write_failure_is_retried_and_logging_resumes(bus, capsys, monkeypatch):
+    sink = bus.sink
+
+    def boom(record):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sink.handler, "emit", boom)
+    bus.event("info", "e.a", "lost 1")
+    bus.event("info", "e.b", "lost 2")  # inside the retry window: dropped without trying
+    assert sink.broken and sink.dropped == 2 and "No space left" in sink.last_error
+    monkeypatch.undo()
+    bus.event("info", "e.c", "still paused")  # disk is fine again, but the retry time has not come
+    assert sink.broken and sink.dropped == 3
+    sink._retry_at = 0  # retry time reached
+    bus.event("info", "e.d", "back")
+    assert not sink.broken and sink.broken_since is None
+    assert [e["event"] for e in read_log(bus)][-1] == "e.d"
+    out = capsys.readouterr().out
+    assert out.count("cannot write") == 1 and "writable again; 3 event(s) lost" in out
+    assert sink.state()["dropped_events"] == 3

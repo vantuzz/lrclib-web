@@ -38,6 +38,8 @@ def main() -> int:
         return 2
 
     def thread_crash(args):
+        # Full traceback also to stderr (docker logs): the JSONL file may be unwritable at that moment.
+        traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=sys.stderr)
         emit(log, "error", "thread.crash", f"thread {args.thread.name if args.thread else '?'} crashed: "
              f"{args.exc_type.__name__}: {args.exc_value}", ui=True,
              error=f"{args.exc_type.__name__}: {args.exc_value}",

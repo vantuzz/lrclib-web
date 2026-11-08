@@ -19,3 +19,7 @@ htmlcov/
 
 # Local runtime data (SQLite, logs)
 data/
+
+# Tool caches (trail)
+graft/.cache/
+.trail/cache/

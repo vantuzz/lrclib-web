@@ -128,6 +128,7 @@ def test_write_error_event_has_traceback(library, data_dir, monkeypatch):
 
 class Server:
     def __init__(self, app):
+        self.app = app
         self.srv = serve(app)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
@@ -245,3 +246,23 @@ def test_handler_crash_is_logged_with_traceback(web, data_dir, monkeypatch):
     ev = [e for e in events(data_dir) if e["event"] == "http.error"][0]
     assert ev["path"] == "/api/diag" and "RuntimeError: diag exploded" in ev["traceback"]
     assert any(e["event"] == "http.5xx" and e["status"] == 500 for e in events(data_dir))
+
+
+def test_client_log_rate_limit_and_refused_count(web, data_dir):
+    from lrclib_web.web import RateLimit
+
+    srv, _, _ = web()
+    srv.app.client_log_limit = RateLimit(2, 600)
+    codes = [srv.req("POST", "/api/client-log", CSRF, {"kind": "k", "message": f"m{i}"})[0] for i in range(4)]
+    assert codes == [200, 200, 429, 429]
+    srv.app.client_log_limit.hits.clear()  # window passed
+    assert srv.req("POST", "/api/client-log", CSRF, {"kind": "k", "message": "after"})[0] == 200
+    evs = [e for e in events(data_dir) if e["event"] == "ui.error"]
+    assert len(evs) == 3 and evs[-1]["client"]["refused_before"] == 2
+
+
+def test_diag_reports_log_sink_state(web):
+    srv, _, _ = web()
+    code, raw, _ = srv.req("GET", "/api/diag")
+    sink = json.loads(raw)["log_sink"]
+    assert code == 200 and sink["broken"] is False and sink["dropped_events"] == 0
