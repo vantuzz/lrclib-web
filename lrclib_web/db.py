@@ -49,6 +49,21 @@ def now() -> int:
     return int(time.time())
 
 
+def data_dir_problem(path: str) -> str | None:
+    """Return a one-line, actionable error if `path` cannot hold the database, else None."""
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, f".write-test-{os.getpid()}")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        return None
+    except OSError as e:
+        who = f"uid {os.getuid()}, gid {os.getgid()}" if hasattr(os, "getuid") else "the container user"
+        return (f"DATA_DIR {path} is not writable ({e.strerror or e}); the process runs as {who}. "
+                f"Fix on the host: chown -R 99:100 <host path mounted at {path}>")
+
+
 class DB:
     def __init__(self, path: str):
         self.path = path

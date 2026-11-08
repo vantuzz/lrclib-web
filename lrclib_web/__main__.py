@@ -9,7 +9,7 @@ import threading
 
 from . import __version__
 from .config import Config
-from .db import DB
+from .db import DB, data_dir_problem
 from .jobs import JobRunner, LogBus
 from .plex import Plex
 from .scheduler import Scheduler
@@ -26,6 +26,10 @@ def main() -> int:
     log("info", f"lrclib-web {__version__} starting; music={cfg.music_dir} data={cfg.data_dir}")
     if not os.path.isdir(cfg.music_dir):
         log("error", f"MUSIC_DIR {cfg.music_dir} is not a directory")
+    problem = data_dir_problem(cfg.data_dir)
+    if problem:
+        log("error", problem)
+        return 2
     db = DB(os.path.join(cfg.data_dir, "lrclib-web.sqlite3"))
     plex = Plex(cfg, db, log) if cfg.plex_enabled else None
     if plex:

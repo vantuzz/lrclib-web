@@ -11,13 +11,21 @@ Mobile-first single page: library scan, lyrics download with live log, nightly s
 > Keep `/config` on a non-FUSE path (e.g. `/mnt/cache/appdata/lrclib-web`); SQLite on `/mnt/user` can corrupt.
 
 1. Copy `compose.example.yml` to `compose.yml` and adjust the two volume paths (`/music` = your library, `/config` = app data).
-2. Start the container:
+2. Create the app data folder and give it to the container user (`99:100` = `nobody:users` on Unraid). Docker would
+   otherwise create it owned by root, and the app stops with "DATA_DIR … is not writable":
+
+   ```
+   mkdir -p /mnt/cache/appdata/lrclib-web && chown 99:100 /mnt/cache/appdata/lrclib-web
+   ```
+
+   The music folder must be writable by the same user too, since `.lrc` files are written next to the audio.
+3. Start the container:
 
    ```
    docker compose up -d
    ```
 
-3. Open `http://<host>:8080` in a browser.
+4. Open `http://<host>:8080` in a browser (change the left side of `8080:8080` if the port is taken).
 
 ## Configuration
 

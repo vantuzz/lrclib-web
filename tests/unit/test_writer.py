@@ -95,3 +95,20 @@ def test_link_other_oserror_propagates_and_cleans_tmp(tmp_path, monkeypatch):
         write_sidecar(str(tmp_path / "a.lrc"), "x")
     assert os.listdir(tmp_path) == []
 
+
+
+def test_data_dir_problem(tmp_path, monkeypatch):
+    from lrclib_web import db as dbmod
+
+    assert dbmod.data_dir_problem(str(tmp_path / "new")) is None  # created and writable
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    msg = dbmod.data_dir_problem(str(blocker))
+    assert msg and "not writable" in msg and "chown -R 99:100" in msg
+
+    def denied(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("builtins.open", denied)
+    msg = dbmod.data_dir_problem(str(tmp_path))
+    assert "Permission denied" in msg
