@@ -65,7 +65,7 @@ class Config:
 
     @property
     def plex_enabled(self) -> bool:
-        return bool(self.plex_url and self.plex_token)
+        return bool(self.plex_url)  # PLEX_TOKEN is optional: a gateway may inject it (D22)
 
     @property
     def auth_enabled(self) -> bool:

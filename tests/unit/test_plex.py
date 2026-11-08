@@ -30,13 +30,14 @@ def tracks_xml(rows, total):
 
 
 class FakePlexServer:
-    def __init__(self, tracks=TRACKS):
+    def __init__(self, tracks=TRACKS, token="tok"):
         self.tracks = tracks
+        self.token = token
         self.calls = []
 
     def __call__(self, method, url, headers, timeout):
         self.calls.append((method, url))
-        assert headers["X-Plex-Token"] == "tok"
+        assert headers.get("X-Plex-Token") == self.token
         u = urllib.parse.urlsplit(url)
         q = urllib.parse.parse_qs(u.query)
         if u.path == "/identity":
@@ -83,6 +84,18 @@ def test_check_discovers_section(db, cfg):
     srv = FakePlexServer()
     p = Plex(cfg, db, transport=srv)
     assert p.check() and p.section_id == "1" and p.ok
+
+
+def test_token_optional_for_gateway(db, cfg):
+    cfg.plex_token = ""  # D22: a gateway in front of Plex injects X-Plex-Token
+    assert cfg.plex_enabled
+    srv = FakePlexServer(token=None)
+    p = Plex(cfg, db, transport=srv)
+    assert p.check() and p.section_id == "1"
+
+
+def test_plex_disabled_without_url(data_dir):
+    assert not Config(data_dir=data_dir, plex_token="tok").plex_enabled
 
 
 def test_check_unauthorized(db, cfg):
