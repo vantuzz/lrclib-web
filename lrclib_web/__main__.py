@@ -42,6 +42,12 @@ def main() -> int:
              f"{args.exc_type.__name__}: {args.exc_value}", ui=True,
              error=f"{args.exc_type.__name__}: {args.exc_value}",
              traceback="".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+        # Full traceback also to stderr (docker logs): the JSONL file may be unwritable at that moment.
+        # After the event, and guarded, so a broken stderr cannot stop the structured record.
+        try:
+            traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=sys.stderr)
+        except Exception:  # noqa: BLE001
+            pass
 
     threading.excepthook = thread_crash
     db = DB(os.path.join(cfg.data_dir, "lrclib-web.sqlite3"))

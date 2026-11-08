@@ -10,6 +10,7 @@ import os
 import platform
 import shutil
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -35,31 +36,68 @@ def _clip(v):
 
 
 class JsonlSink:
-    """Rotating JSON Lines file. Never raises: a failing write is reported once to stdout and then ignored."""
+    """Rotating JSON Lines file. Never raises. A failing write (disk full, unwritable dir) pauses file logging and
+    is reported once to stdout; writes are retried after RETRY_S, so a transient error does not disable the log
+    until restart. The state is exposed in /api/diag (`log_sink`)."""
+
+    RETRY_S = 60.0
 
     def __init__(self, log_dir: str, max_bytes: int = MAX_BYTES, backups: int = BACKUPS):
         self.path = os.path.join(log_dir, LOG_NAME)
         self.broken = False
+        self.broken_since: float | None = None
+        self.last_error: str | None = None
+        self.dropped = 0
+        self._retry_at = 0.0
+        self._failed = False
+        self._lock = threading.RLock()  # LogBus calls write() from several threads; the state below is shared
         self.handler = logging.handlers.RotatingFileHandler(
             self.path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8"
         )
         self.handler.setFormatter(logging.Formatter("%(message)s"))
         self.handler.handleError = self._on_error  # type: ignore[method-assign]
 
-    def _on_error(self, record) -> None:
+    def _on_error(self, record=None, exc: BaseException | None = None) -> None:
+        self._failed = True
+        err = exc if exc is not None else sys.exc_info()[1]
+        self.last_error = f"{type(err).__name__}: {err}" if err is not None else "unknown error"
+        now = time.time()
+        self._retry_at = now + self.RETRY_S
         if not self.broken:
-            self.broken = True
-            print(f"diagnostics: cannot write {self.path}: {sys.exc_info()[1]}; file log disabled", flush=True)
+            self.broken, self.broken_since = True, now
+            print(f"diagnostics: cannot write {self.path}: {self.last_error}; file log paused, "
+                  f"retry every {int(self.RETRY_S)} s", flush=True)
 
     def write(self, line: str) -> None:
+        with self._lock:
+            self._write(line)
+
+    def _write(self, line: str) -> None:
         if self.broken:
-            return
+            if time.time() < self._retry_at:
+                self.dropped += 1
+                return
+            try:  # reopen the stream on retry; a stream left after ENOSPC may stay broken
+                self.handler.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._failed = False
         try:
             self.handler.handle(logging.makeLogRecord({"msg": line, "levelno": logging.INFO}))
         except Exception as e:  # noqa: BLE001 - logging must never break the app
-            if not self.broken:
-                self.broken = True
-                print(f"diagnostics: cannot write {self.path}: {e}; file log disabled", flush=True)
+            self._on_error(exc=e)
+        if self._failed:
+            if self.broken:
+                self.dropped += 1
+            return
+        if self.broken:
+            print(f"diagnostics: {self.path} writable again; {self.dropped} event(s) lost", flush=True)
+            self.broken, self.broken_since = False, None
+
+    def state(self) -> dict:
+        with self._lock:
+            return {"path": self.path, "broken": self.broken, "broken_since": self.broken_since,
+                    "last_error": self.last_error, "dropped_events": self.dropped}
 
     def paths(self) -> list[str]:
         """Existing log files, oldest first."""
@@ -220,6 +258,16 @@ def _strip_url(u: str) -> str:
         return "<unparsable>"
 
 
+def _log_files(paths: list[str]) -> list[dict]:
+    out = []
+    for p in paths:
+        try:
+            out.append({"path": p, "size_bytes": os.path.getsize(p)})
+        except OSError:  # rotated away between listing and stat
+            continue
+    return out
+
+
 def build_diag(app) -> dict:
     cfg, db = app.cfg, app.db
     conf = cfg.public()
@@ -261,7 +309,8 @@ def build_diag(app) -> dict:
         "dirs": {"music_dir": _dir_info(cfg.music_dir), "data_dir": _dir_info(cfg.data_dir)},
         "db": db_info,
         "status": status,
-        "log_files": [{"path": p, "size_bytes": os.path.getsize(p)} for p in paths if os.path.exists(p)],
+        "log_sink": sink.state() if sink else None,
+        "log_files": _log_files(paths),
         "recent_events": read_events(paths, DIAG_TAIL_EVENTS, DIAG_TAIL_BYTES),
         "recent_errors": read_events(paths, DIAG_ERROR_EVENTS, DIAG_ERROR_BYTES, only_errors_since=until),
         "limits": {"recent_events": DIAG_TAIL_EVENTS, "recent_errors": DIAG_ERROR_EVENTS,

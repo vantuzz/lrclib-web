@@ -6,6 +6,7 @@ import base64
 import hmac
 import json
 import os
+import threading
 import time
 import traceback
 import urllib.parse
@@ -20,6 +21,29 @@ from .plex import Plex
 from .scheduler import Scheduler
 
 CLIENT_LOG_MAX = 16 * 1024  # POST /api/client-log body cap
+CLIENT_LOG_RATE = (30, 600.0)  # at most 30 accepted reports per 10 minutes, whatever the client does
+
+
+class RateLimit:
+    """Sliding-window counter shared by all request threads; counts what it refused."""
+
+    def __init__(self, limit: int, window_s: float):
+        self.limit, self.window = limit, window_s
+        self.hits: list[float] = []
+        self.refused = 0
+        self.lock = threading.Lock()
+
+    def take(self) -> tuple[bool, int]:
+        """(allowed, refused since the last allowed call)."""
+        now = time.monotonic()
+        with self.lock:
+            self.hits = [t for t in self.hits if now - t < self.window]
+            if len(self.hits) >= self.limit:
+                self.refused += 1
+                return False, 0
+            self.hits.append(now)
+            refused, self.refused = self.refused, 0
+            return True, refused
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
@@ -35,6 +59,7 @@ class App:
     def __init__(self, cfg: Config, db: DB, log: LogBus, runner: JobRunner, plex: Plex | None,
                  scheduler: Scheduler | None):
         self.cfg, self.db, self.log, self.runner, self.plex, self.scheduler = cfg, db, log, runner, plex, scheduler
+        self.client_log_limit = RateLimit(*CLIENT_LOG_RATE)
 
     def status(self) -> dict:
         counts = self.db.status_counts()
@@ -201,6 +226,11 @@ def make_handler(app: App):
             client = {"kind": s("kind", 64), "message": s("message", 2000), "stack": s("stack", 8000),
                       "url": s("url", 500), "state": state if isinstance(state, dict) else None,
                       "user_agent": (self.headers.get("User-Agent") or "")[:300]}
+            allowed, refused = app.client_log_limit.take()
+            if not allowed:
+                return self._json(429, {"error": "too many reports"})
+            if refused:
+                client["refused_before"] = refused  # reports dropped by the rate limit since the last one
             emit(app.log, "error", "ui.error", f"UI {client['kind'] or 'error'}: {client['message']}"[:300],
                  ui=False, client=client)
             self._json(200, {"ok": True})
