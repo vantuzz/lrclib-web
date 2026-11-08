@@ -7,6 +7,7 @@ import json
 import random
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from . import __version__
+from .diaglog import emit
 
 MAX_GAP_S = 5.0  # cap for the adaptive request gap
 OK_STREAK_TO_RELAX = 20
@@ -41,6 +43,9 @@ class Response:
 class Transport:
     """Thin wrapper around urllib so tests can replace it."""
 
+    def __init__(self, log: Callable[[str, str], None] = lambda level, msg: None):
+        self.log = log
+
     def __call__(self, url: str, headers: dict[str, str], timeout: float):
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
@@ -50,8 +55,9 @@ class Transport:
             body = b""
             try:
                 body = e.read()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e2:  # noqa: BLE001
+                emit(self.log, "warn", "lrclib.transport_error", f"cannot read LRCLIB error body: {e2}", ui=False,
+                     url=url.split("?", 1)[0], status=e.code, traceback=traceback.format_exc())
             return e.code, dict(e.headers.items()) if e.headers else {}, body
 
 
@@ -97,7 +103,7 @@ class LrclibClient:
         self.jitter = max(0.0, jitter_ms / 1000.0)
         self.stop = stop or threading.Event()
         self.log = log
-        self.transport = transport or Transport()
+        self.transport = transport or Transport(log)
         self.clock = clock
         self.rand = rand
         self.breaker_pause_s = breaker_pause_s
@@ -161,6 +167,21 @@ class LrclibClient:
             self.on_cooldown(None)
 
     # -- request ---------------------------------------------------------
+    def _trace(self, path, params, status, t_req, body, net_err, tb) -> None:
+        count = 0
+        if status == 200 and body:
+            try:
+                data = json.loads(body.decode("utf-8"))
+                count = len(data) if isinstance(data, list) else 1
+            except (ValueError, UnicodeDecodeError):
+                count = 0
+        q = {"title": params.get("track_name"), "artist": params.get("artist_name"),
+             "album": params.get("album_name") or None, "duration": params.get("duration")}
+        emit(self.log, "debug", "lrclib.request", f"GET {path} -> {status}", ui=False, endpoint=path,
+             params={k: v for k, v in q.items() if v is not None}, status=status,
+             duration_ms=int((time.monotonic() - t_req) * 1000), result_count=count, error=net_err, traceback=tb,
+             request_no=self.requests)
+
     def request(self, path: str, params: dict[str, object]) -> Response:
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         url = f"{self.base}{path}?{query}" if query else f"{self.base}{path}"
@@ -174,13 +195,17 @@ class LrclibClient:
             self._pace()
             self._last_request = self.clock()
             self.requests += 1
+            t_req = time.monotonic()
+            tb = None
             try:
                 status, headers, body = self.transport(url, self._headers(), 30.0)
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
                 status, headers, body = 0, {}, b""
                 net_err = f"network: {getattr(e, 'reason', e)}"
+                tb = traceback.format_exc()
             else:
                 net_err = None
+            self._trace(path, params, status, t_req, body, net_err, tb)
 
             if status in (429, 503):
                 attempts_429 += 1

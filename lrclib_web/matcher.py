@@ -96,6 +96,7 @@ class Matcher:
     def __init__(self, client: LrclibClient, search_for_synced: bool = False):
         self.client = client
         self.search_for_synced = search_for_synced
+        self.last_stats: dict = {}  # candidates / survivors of the last match() search step, for diagnostics
 
     @staticmethod
     def _from_record(rec: dict, requests: int) -> Match:
@@ -109,6 +110,7 @@ class Matcher:
         return Match("error", reason=r.error or f"HTTP {r.status}", transient=r.transient, requests=requests)
 
     def match(self, title: str, artist: str, album: str | None, duration_ms: int | None) -> Match:
+        self.last_stats = {}
         duration_s = (duration_ms or 0) / 1000.0
         dur_int = int(round(duration_s)) if duration_s else 0
         n = 0
@@ -149,12 +151,14 @@ class Matcher:
                 return Match("not_found", requests=n)
             return self._err(r, n)
         cands = r.data if isinstance(r.data, list) else []
+        self.last_stats["candidates"] = len(cands)
         if not cands:
             if plain_from_get:
                 plain_from_get.requests = n
                 return plain_from_get
             return Match("not_found", reason="no search results", requests=n)
         good = filter_candidates(cands, title, artist, album, duration_s)
+        self.last_stats["survivors"] = len(good)
         if not good:
             if plain_from_get:
                 plain_from_get.requests = n

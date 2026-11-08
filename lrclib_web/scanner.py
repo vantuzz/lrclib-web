@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from .config import Config
 from .db import DB, now
+from .diaglog import emit
 from .tags import Tags, read_tags
 
 COMMIT_EVERY = 500
@@ -120,7 +121,8 @@ class Scanner:
             root_entries = [e for e in os.scandir(root) if not _skip_name(e.name)]
         except OSError as e:
             res.errors.append(f"cannot list {root}: {e}")
-            self.log("error", f"scan aborted: cannot list music dir {root}: {e}")
+            emit(self.log, "error", "scan.aborted", f"scan aborted: cannot list music dir {root}: {e}", root=root,
+                 reason=str(e))
             return res
         root_empty = not root_entries
 
@@ -254,7 +256,7 @@ class Scanner:
                 ):
                     missing_candidates.append(r[0])
                 if incomplete:
-                    self.log("warn", "scan incomplete, missing-marking skipped")
+                    emit(self.log, "warn", "scan.incomplete", "scan incomplete, missing-marking skipped")
                 else:
                     self._mark_missing(missing_candidates, root_empty, res, ts)
                 self._purge(res, ts, scan_id)
@@ -266,6 +268,14 @@ class Scanner:
             db.set_meta("last_scan", f"{ts}:{mode}")
         return res
 
+    def _read_tags(self, path: str, rel: str) -> Tags:
+        tags = self.read_tags(path)
+        if tags.error:
+            # one debug line per unreadable / untagged file; the traceback only exists for mutagen failures
+            emit(self.log, "debug", "tags.error", f"tags {rel}: {tags.error}", ui=False, rel_path=rel,
+                 reason=tags.error, traceback=getattr(tags, "traceback", None))
+        return tags
+
     def _file(self, e, trel, dir_id, names, row, res: ScanResult, ts: int) -> None:
         db = self.db
         try:
@@ -276,7 +286,7 @@ class Scanner:
         stem = e.name.rsplit(".", 1)[0]
         lrc, txt = _sidecars(names, stem)
         if row is None:
-            tags = self.read_tags(e.path)
+            tags = self._read_tags(e.path, trel)
             status, reason = self._status_for(tags, lrc)
             db.execute(
                 "INSERT INTO tracks(rel_path, dir_id, mtime_ns, size, title, artist, album_artist, album, "
@@ -293,7 +303,7 @@ class Scanner:
 
         changed = (row["mtime_ns"], row["size"]) != (st.st_mtime_ns, st.st_size)
         if changed:
-            tags = self.read_tags(e.path)
+            tags = self._read_tags(e.path, trel)
             status, reason = self._status_for(tags, lrc)
             db.update_track(
                 row["id"], mtime_ns=st.st_mtime_ns, size=st.st_size, title=tags.title, artist=tags.artist,
@@ -343,7 +353,7 @@ class Scanner:
                 + f"raise MISSING_ABORT_PCT={self.cfg.missing_abort_pct} if intended)"
             )
             res.errors.append(msg)
-            self.log("error", msg)
+            emit(self.log, "error", "scan.missing_guard", msg, missing=len(ids), known=known, percent=round(pct, 1))
             return
         for i in ids:
             self.db.execute(

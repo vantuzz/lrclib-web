@@ -6,10 +6,12 @@ import os
 import signal
 import sys
 import threading
+import traceback
 
 from . import __version__
 from .config import Config
 from .db import DB, data_dir_problem
+from .diaglog import emit
 from .jobs import JobRunner, LogBus
 from .plex import Plex
 from .scheduler import Scheduler
@@ -23,13 +25,25 @@ def main() -> int:
     except ValueError:
         pass
     log = LogBus(level=cfg.log_level)
-    log("info", f"lrclib-web {__version__} starting; music={cfg.music_dir} data={cfg.data_dir}")
-    if not os.path.isdir(cfg.music_dir):
-        log("error", f"MUSIC_DIR {cfg.music_dir} is not a directory")
     problem = data_dir_problem(cfg.data_dir)
+    if not problem:
+        log.attach_file(os.path.join(cfg.data_dir, "logs"))  # JSONL event log; runs without it if impossible
+    log("info", f"lrclib-web {__version__} starting; music={cfg.music_dir} data={cfg.data_dir}",
+        event="app.start", python=sys.version.split()[0], pid=os.getpid(),
+        uid=os.getuid() if hasattr(os, "getuid") else None, log_file=log.sink.path if log.sink else None)
+    if not os.path.isdir(cfg.music_dir):
+        log("error", f"MUSIC_DIR {cfg.music_dir} is not a directory", event="app.config_error")
     if problem:
-        log("error", problem)
+        log("error", problem, event="app.config_error")
         return 2
+
+    def thread_crash(args):
+        emit(log, "error", "thread.crash", f"thread {args.thread.name if args.thread else '?'} crashed: "
+             f"{args.exc_type.__name__}: {args.exc_value}", ui=True,
+             error=f"{args.exc_type.__name__}: {args.exc_value}",
+             traceback="".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+    threading.excepthook = thread_crash
     db = DB(os.path.join(cfg.data_dir, "lrclib-web.sqlite3"))
     plex = Plex(cfg, db, log) if cfg.plex_enabled else None
     if plex:

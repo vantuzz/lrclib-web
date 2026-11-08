@@ -8,10 +8,13 @@ import os
 import sys
 import threading
 import time
+import traceback
+import uuid
 from collections.abc import Callable
 
 from .config import Config
 from .db import DB, now
+from .diaglog import BACKUPS, MAX_BYTES, JsonlSink, emit, make_line
 from .lrclib import LrclibClient, LrclibUnavailable, Stopped
 from .matcher import Match, Matcher
 from .plex import Plex
@@ -47,23 +50,61 @@ COUNTER_KEYS = ("synced", "plain", "not_found", "rejected", "instrumental", "unt
 
 
 class LogBus:
-    """In-memory ring buffer of log lines with monotonically increasing ids."""
+    """In-memory ring buffer of log lines with monotonically increasing ids.
 
-    def __init__(self, size: int = 2000, level: str = "info"):
+    Human-readable lines go to the UI ring buffer and stdout. Every event (also the structured, file-only ones from
+    `event()`) is additionally written as one JSON object per line to <log_dir>/app.jsonl once `attach_file` ran.
+    """
+
+    def __init__(self, size: int = 2000, level: str = "info", log_dir: str | None = None):
         self.lines: collections.deque = collections.deque(maxlen=size)
         self.next_id = 1
         self.cond = threading.Condition()
         self.debug = level == "debug"
+        self.run_id: str | None = None
+        self.sink: JsonlSink | None = None
+        if log_dir:
+            self.attach_file(log_dir)
 
-    def __call__(self, level: str, msg: str) -> None:
+    def attach_file(self, log_dir: str, max_bytes: int = MAX_BYTES, backups: int = BACKUPS) -> bool:
+        """Start writing JSONL events into log_dir. Returns False (and runs without a file) if that is impossible."""
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            self.sink = JsonlSink(log_dir, max_bytes, backups)
+            return True
+        except OSError as e:
+            self.sink = None
+            print(f"diagnostics: cannot use log dir {log_dir}: {e.strerror or e}; running without file log",
+                  flush=True)
+            return False
+
+    def _write_file(self, ts: float, level: str, event: str, msg: str, fields: dict) -> None:
+        if self.sink is None:
+            return
+        try:
+            self.sink.write(make_line(ts, level, event, msg, self.run_id, fields))
+        except Exception as e:  # noqa: BLE001 - e.g. unserialisable field; never break the caller
+            print(f"diagnostics: cannot format event {event}: {e}", flush=True)
+
+    def __call__(self, level: str, msg: str, event: str = "log", **fields) -> None:
+        self._log(level, msg, event, True, fields)
+
+    def event(self, level: str, event: str, msg: str, ui: bool = False, **fields) -> None:
+        """Structured event. ui=False keeps it out of the UI log and stdout (file only)."""
+        self._log(level, msg, event, ui, fields)
+
+    def _log(self, level: str, msg: str, event: str, ui: bool, fields: dict) -> None:
         if level == "debug" and not self.debug:
             return
-        with self.cond:
-            item = {"id": self.next_id, "ts": time.time(), "level": level, "msg": msg}
-            self.next_id += 1
-            self.lines.append(item)
-            self.cond.notify_all()
-        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {level:5} {msg}", file=sys.stdout, flush=True)
+        ts = time.time()
+        if ui:
+            with self.cond:
+                item = {"id": self.next_id, "ts": ts, "level": level, "msg": msg}
+                self.next_id += 1
+                self.lines.append(item)
+                self.cond.notify_all()
+            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {level:5} {msg}", file=sys.stdout, flush=True)
+        self._write_file(ts, level, event, msg, fields)
 
     def since(self, last_id: int, limit: int = 500) -> list[dict]:
         with self.cond:
@@ -115,13 +156,15 @@ class JobRunner:
     def _recover(self) -> None:
         cur = self.db.get_json("current_job")
         if cur:
-            self.log("warn", f"job #{cur.get('id')} ({cur.get('type')}) was interrupted by a restart")
+            emit(self.log, "warn", "job.interrupted",
+                 f"job #{cur.get('id')} ({cur.get('type')}) was interrupted by a restart",
+                 job_id=cur.get("id"), type=cur.get("type"), prev_run_id=cur.get("run_id"))
             self._remember({**cur, "state": "interrupted", "finished_at": now()})
             self.db.execute("DELETE FROM meta WHERE key='current_job'")
 
     def _remember(self, job: dict) -> None:
         runs = self.db.get_json("last_runs", [])
-        runs.insert(0, {k: job.get(k) for k in ("id", "type", "mode", "trigger", "state", "started_at",
+        runs.insert(0, {k: job.get(k) for k in ("id", "run_id", "type", "mode", "trigger", "state", "started_at",
                                                  "finished_at", "summary", "counters")})
         self.db.set_json("last_runs", runs[:5])
 
@@ -149,7 +192,8 @@ class JobRunner:
             self.db.set_meta("job_seq", str(self._job_seq))
             self.stop_event = threading.Event()
             self.state = {
-                "id": self._job_seq, "type": jtype, "mode": mode if jtype != "download" else None,
+                "id": self._job_seq, "run_id": uuid.uuid4().hex[:12], "type": jtype,
+                "mode": mode if jtype != "download" else None,
                 "trigger": trigger, "state": "running", "phase": "starting", "done": 0, "total": 0,
                 "current": "", "counters": dict.fromkeys(COUNTER_KEYS, 0), "cooldown_until": None,
                 "breaker_state": "closed", "started_at": now(), "finished_at": None, "eta_s": None,
@@ -181,9 +225,12 @@ class JobRunner:
         assert st is not None
         summary: list[str] = []
         final = "done"
+        t_start = time.monotonic()
+        self._set_run_id(st.get("run_id"))
         try:
             mode = f" {st['mode']}" if st["mode"] else ""
-            self.log("info", f"job #{st['id']} {st['type']}{mode} started ({st['trigger']})")
+            emit(self.log, "info", "job.start", f"job #{st['id']} {st['type']}{mode} started ({st['trigger']})",
+                 job_id=st["id"], type=st["type"], mode=st["mode"], trigger=st["trigger"])
             if st["type"] in ("scan", "run"):
                 res = self._scan(st["mode"])
                 summary.append("scan: " + res.summary())
@@ -198,14 +245,23 @@ class JobRunner:
         except Exception as e:  # noqa: BLE001
             final = "failed"
             summary.append(f"failed: {e}")
-            self.log("error", f"job failed: {type(e).__name__}: {e}")
+            emit(self.log, "error", "job.error", f"job failed: {type(e).__name__}: {e}",
+                 job_id=st["id"], error=f"{type(e).__name__}: {e}", traceback=traceback.format_exc())
         finally:
             self._bump(state=final, phase="finished", finished_at=now(), summary="; ".join(summary),
                        current="", cooldown_until=None, eta_s=None)
             self._remember(self.state)
             self.db.execute("DELETE FROM meta WHERE key='current_job'")
-            self.log("info" if final == "done" else "warn", f"job #{st['id']} {final}: {'; '.join(summary)}")
+            emit(self.log, "info" if final == "done" else "warn", "job.finish",
+                 f"job #{st['id']} {final}: {'; '.join(summary)}", job_id=st["id"], type=st["type"], state=final,
+                 duration_s=round(time.monotonic() - t_start, 3), counters=dict(st["counters"]),
+                 summary="; ".join(summary))
+            self._set_run_id(None)
             self.db.close()
+
+    def _set_run_id(self, run_id: str | None) -> None:
+        if hasattr(self.log, "run_id"):
+            self.log.run_id = run_id
 
     def _scan(self, mode: str):
         self._bump(phase=f"scan ({mode})", done=0, total=0)
@@ -217,11 +273,15 @@ class JobRunner:
                 self._bump(done=done, total=total, current=cur)
 
         sc = self.scanner_factory(self.db, self.cfg, log=self.log, progress=progress, stop=self.stop_event)
+        t0 = time.monotonic()
         res = sc.run(mode)
         for e in res.errors[:20]:
             self.log("warn", f"scan: {e}")
         self.state["counters"]["untagged"] += res.untagged
-        self.log("info", "scan: " + res.summary())
+        emit(self.log, "info", "scan.summary", "scan: " + res.summary(), mode=mode,
+             duration_s=round(time.monotonic() - t0, 3), errors=res.errors[:20], error_count=len(res.errors),
+             **{k: getattr(res, k) for k in ("dirs_listed", "dirs_skipped", "files_seen", "new", "changed",
+                                             "untagged", "missing", "restored", "purged", "stopped")})
         return res
 
     def _cooldown(self, until):
@@ -246,7 +306,7 @@ class JobRunner:
         try:
             lock = self._lock_download()
         except DownloadLocked:
-            self.log("error", "another lrclib-web process is downloading")
+            emit(self.log, "error", "download.locked", "another lrclib-web process is downloading")
             summary.append("download: another lrclib-web process is downloading")
             return "failed"
         try:
@@ -260,7 +320,7 @@ class JobRunner:
         tracks = db.due_tracks(now())
         total = len(tracks)
         self._bump(phase="download", done=0, total=total, current="")
-        self.log("info", f"download: {total} track(s) due")
+        emit(self.log, "info", "download.start", f"download: {total} track(s) due", due=total)
         client = self.client_factory(stop=self.stop_event, log=self.log, on_cooldown=self._cooldown)
         matcher = Matcher(client, cfg.search_for_synced)
         c = self.state["counters"]
@@ -273,7 +333,8 @@ class JobRunner:
                 break
             if budget > 0 and time.monotonic() - t0 >= budget:  # D17: clean stop, next run continues
                 left = total - i
-                self.log("warn", f"download: RUN_MAX_MINUTES={cfg.run_max_minutes} reached, {left} track(s) left")
+                emit(self.log, "warn", "download.budget",
+                     f"download: RUN_MAX_MINUTES={cfg.run_max_minutes} reached, {left} track(s) left", left=left)
                 summary.append(f"download: run budget reached, {left} left for the next run")
                 break
             label = f"{row['artist']} — {row['title']}"
@@ -284,20 +345,47 @@ class JobRunner:
                 state = "stopped"
                 break
             except LrclibUnavailable:
+                emit(self.log, "error", "lrclib.unavailable", "LRCLIB unavailable, stopping the download",
+                     ui=False, requests=client.requests)
                 self._bump(breaker_state="open")
                 summary.append("download: LRCLIB unavailable, stopped early")
                 state = "failed"
                 break
+            self._decision(row, m, matcher)
             self._apply(row, m, c, label)
             elapsed = time.monotonic() - t0
             per = elapsed / (i + 1)
             self._bump(done=i + 1, eta_s=int(per * (total - i - 1)))
             if i % 100 == 0:
                 db.set_json("current_job", self.state)
+        emit(self.log, "info", "download.summary", f"download {state}", ui=False, state=state,
+             counters=dict(c), requests=client.requests, duration_s=round(time.monotonic() - t0, 3))
         summary.append(
             "download: " + ", ".join(f"{k} {c[k]}" for k in COUNTER_KEYS if c[k]) + f"; {client.requests} request(s)"
         )
         return state
+
+    def _decision(self, row, m: Match, matcher) -> None:
+        rec = m.record or {}
+        diff = None
+        try:
+            if rec.get("duration") is not None and row["duration_ms"]:
+                diff = round(float(rec["duration"]) - row["duration_ms"] / 1000.0, 3)
+        except (TypeError, ValueError):
+            pass
+        stats = getattr(matcher, "last_stats", None) or {}
+        emit(self.log, "warn" if m.kind == "error" else "info", "match.decision",
+             f"match {row['rel_path']}: {m.kind}" + (f" ({m.reason})" if m.reason else ""), ui=False,
+             rel_path=row["rel_path"], kind=m.kind, reason=m.reason, record_id=rec.get("id"),
+             duration_diff_s=diff, track_duration_s=round((row["duration_ms"] or 0) / 1000.0, 3),
+             candidates=stats.get("candidates"), survivors=stats.get("survivors"), requests=m.requests,
+             transient=m.transient or None)
+
+    def _rel(self, path: str) -> str:
+        try:
+            return os.path.relpath(path, self.cfg.music_dir).replace(os.sep, "/")
+        except ValueError:
+            return path
 
     def _apply(self, row, m: Match, c: dict, label: str) -> None:
         cfg, db = self.cfg, self.db
@@ -317,7 +405,8 @@ class JobRunner:
                 return False
             db.update_track(row["id"], status="missing", prev_status=row["status"], missing_since=ts)
             c["skipped"] += 1
-            self.log("warn", f"audio vanished {label}")
+            emit(self.log, "warn", "write.skipped", f"audio vanished {label}", rel_path=row["rel_path"],
+                 reason="audio vanished")
             return True
 
         if m.kind in ("not_found", "rejected"):  # D19: escalate re-check while the miss repeats
@@ -334,21 +423,25 @@ class JobRunner:
             except WriteSkipped:
                 upd.update(status="has_lrc", reason=".lrc exists", lrc_exists=1)
                 c["skipped"] += 1
-                self.log("info", f"skip  {label}: .lrc already exists")
+                emit(self.log, "info", "write.skipped", f"skip  {label}: .lrc already exists",
+                     rel_path=self._rel(target), reason=".lrc exists")
             except PermanentWriteError as e:
                 upd.update(status="error", reason=str(e), next_check_at=ts + PERMANENT_RETRY_DAYS * DAY)
                 c["error"] += 1
-                self.log("error", f"error {label}: {e}")
+                emit(self.log, "error", "write.error", f"error {label}: {e}", rel_path=self._rel(target),
+                     reason=str(e), permanent=True)
             except OSError as e:
                 upd.update(status="error", reason=f"write: {e.strerror or e}", next_check_at=ts + DAY)
                 c["error"] += 1
-                self.log("error", f"error {label}: cannot write .lrc: {e}")
+                emit(self.log, "error", "write.error", f"error {label}: cannot write .lrc: {e}",
+                     rel_path=self._rel(target), reason=str(e), errno=e.errno, traceback=traceback.format_exc())
             else:
                 upd.update(status="synced", reason=None, lrc_exists=1, written_file=os.path.basename(target),
                            written_sha256=sha, written_by_us=1, written_at=ts, remote_sha256=sha256_text(text),
                            plex_pending=1 if cfg.plex_enabled else 0, next_check_at=None)
                 c["synced"] += 1
-                self.log("ok", f"ok    {label}: synced → .lrc")
+                emit(self.log, "ok", "write.ok", f"ok    {label}: synced → .lrc", rel_path=self._rel(target),
+                     kind="synced", bytes=len(text.encode("utf-8")), lrclib_id=(m.record or {}).get("id"))
                 if (row["txt_exists"] and cfg.txt_on_synced == "delete" and row["written_by_us"]
                         and (row["written_file"] or "").lower().endswith(".txt")):
                     txt = sidecar_path(audio, "txt")
@@ -358,11 +451,14 @@ class JobRunner:
                         if current == row["written_sha256"]:
                             remove_sidecar(txt, cfg.music_dir)
                             upd["txt_exists"] = 0
-                            self.log("info", f"      {label}: removed our .txt (TXT_ON_SYNCED=delete)")
+                            emit(self.log, "info", "write.txt_removed",
+                                 f"      {label}: removed our .txt (TXT_ON_SYNCED=delete)", rel_path=self._rel(txt))
                         else:
-                            self.log("info", f"      {label}: txt modified locally, kept")
+                            emit(self.log, "info", "write.skipped", f"      {label}: txt modified locally, kept",
+                                 rel_path=self._rel(txt), reason="txt modified locally")
                     except UnsafePathError as e:
-                        self.log("error", f"error {label}: {e}")
+                        emit(self.log, "error", "write.error", f"error {label}: {e}", rel_path=self._rel(txt),
+                             reason=str(e), traceback=traceback.format_exc())
                     except OSError:
                         pass
         elif m.kind == "plain":
@@ -370,7 +466,8 @@ class JobRunner:
             if row["txt_exists"]:
                 upd["reason"] = "txt exists"
                 c["plain"] += 1
-                self.log("info", f"plain {label}: plain only, .txt already exists")
+                emit(self.log, "info", "write.skipped", f"plain {label}: plain only, .txt already exists",
+                     rel_path=self._rel(sidecar_path(audio, "txt")), reason="txt exists")
             else:
                 target = sidecar_path(audio, "txt")
                 if vanished():
@@ -380,17 +477,22 @@ class JobRunner:
                 except WriteSkipped:
                     upd.update(reason="txt exists", txt_exists=1)
                     c["plain"] += 1
+                    emit(self.log, "info", "write.skipped", f"plain {label}: .txt exists", ui=False,
+                         rel_path=self._rel(target), reason="txt exists")
                 except OSError as e:
                     upd.update(status="error", reason=f"write: {e}", next_check_at=ts + DAY)
                     c["error"] += 1
-                    self.log("error", f"error {label}: cannot write .txt: {e}")
+                    emit(self.log, "error", "write.error", f"error {label}: cannot write .txt: {e}",
+                         rel_path=self._rel(target), reason=str(e), errno=e.errno, traceback=traceback.format_exc())
                 else:
                     upd.update(reason="plain only", txt_exists=1, written_file=os.path.basename(target),
                                written_sha256=sha, written_by_us=1, written_at=ts,
                                remote_sha256=sha256_text(m.lyrics or ""),
                                plex_pending=1 if cfg.plex_enabled else 0)
                     c["plain"] += 1
-                    self.log("ok", f"ok    {label}: plain only → .txt")
+                    emit(self.log, "ok", "write.ok", f"ok    {label}: plain only → .txt", rel_path=self._rel(target),
+                         kind="plain", bytes=len((m.lyrics or "").encode("utf-8")),
+                         lrclib_id=(m.record or {}).get("id"))
         elif m.kind == "instrumental":
             upd.update(status="instrumental", reason="instrumental",
                        next_check_at=ts + INSTRUMENTAL_RECHECK_DAYS * DAY)
@@ -412,5 +514,6 @@ class JobRunner:
                 upd.update(status="error", reason=m.reason, attempts=attempts, next_check_at=ts + delay)
             else:
                 upd.update(status="error", reason=m.reason, next_check_at=ts + PERMANENT_RETRY_DAYS * DAY)
-            self.log("error", f"error {label}: {m.reason}")
+            emit(self.log, "error", "match.error", f"error {label}: {m.reason}", rel_path=row["rel_path"],
+                 reason=m.reason, transient=m.transient)
         db.update_track(row["id"], **upd)

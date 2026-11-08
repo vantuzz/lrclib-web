@@ -5,6 +5,7 @@ from __future__ import annotations
 import posixpath
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,6 +14,7 @@ from collections.abc import Callable
 
 from .config import Config
 from .db import DB, now
+from .diaglog import emit
 
 PAGE = 1000
 
@@ -66,10 +68,16 @@ class Plex:
         if self.cfg.plex_token:
             h["X-Plex-Token"] = self.cfg.plex_token
         h.update(headers or {})
+        t0 = time.monotonic()
         try:
             status, body = self.transport(method, url, h, 30.0)
         except (urllib.error.URLError, OSError) as e:
+            emit(self.log, "debug", "plex.request", f"{method} {path} failed: {e}", ui=False, method=method,
+                 path=path, status=0, duration_ms=int((time.monotonic() - t0) * 1000), error=str(e),
+                 traceback=traceback.format_exc())
             raise PlexError(f"connection failed: {getattr(e, 'reason', e)}") from None
+        emit(self.log, "debug", "plex.request", f"{method} {path} -> {status}", ui=False, method=method, path=path,
+             status=status, duration_ms=int((time.monotonic() - t0) * 1000), bytes=len(body or b""))
         if status == 401:
             raise PlexError("unauthorized (check PLEX_TOKEN, or the token injected by your gateway)")
         if status >= 400:
@@ -79,6 +87,7 @@ class Plex:
     def check(self) -> bool:
         if not self.enabled:
             return False
+        t0 = time.monotonic()
         try:
             self._call("GET", "/identity")
             if not self.section_id:
@@ -90,14 +99,18 @@ class Plex:
                     )
                 self.section_id = music[0]
             self.ok, self.error = True, None
+            emit(self.log, "info", "plex.check", "Plex: connection OK", ui=False, ok=True,
+                 section_id=self.section_id, duration_ms=int((time.monotonic() - t0) * 1000))
         except (PlexError, ET.ParseError) as e:
             self.ok, self.error = False, str(e)
-            self.log("warn", f"Plex: {e}")
+            emit(self.log, "warn", "plex.check", f"Plex: {e}", ok=False, error=str(e),
+                 duration_ms=int((time.monotonic() - t0) * 1000), traceback=traceback.format_exc())
         return bool(self.ok)
 
     def build_index(self) -> int:
         start, n = 0, 0
         ts = now()
+        t0 = time.monotonic()
         self.db.execute("BEGIN")
         try:
             while True:
@@ -131,6 +144,8 @@ class Plex:
             self.db.execute("ROLLBACK")
             raise
         self.db.set_meta("plex_index_at", str(ts))
+        emit(self.log, "info", "plex.index", f"Plex index built: {n} file(s)", ui=False, files=n,
+             duration_ms=int((time.monotonic() - t0) * 1000))
         return n
 
     def _lookup(self, plex_file: str):
@@ -177,9 +192,11 @@ class Plex:
             for d in sorted({posixpath.dirname(pf) for _, pf in unknown}):
                 try:
                     self._call("GET", f"/library/sections/{self.section_id}/refresh", {"path": d})
-                    self.log("info", f"Plex: file not in library yet, scanning {d}")
+                    emit(self.log, "info", "plex.partial_scan", f"Plex: file not in library yet, scanning {d}",
+                         dir=d)
                 except PlexError as e:
-                    self.log("warn", f"Plex: partial scan failed for {d}: {e}")
+                    emit(self.log, "warn", "plex.error", f"Plex: partial scan failed for {d}: {e}", op="partial_scan",
+                         dir=d, error=str(e), traceback=traceback.format_exc())
             stats["unknown"] = len(unknown)
 
             gap = self.cfg.plex_refresh_gap_ms / 1000.0
@@ -194,19 +211,22 @@ class Plex:
                     self._call("PUT", f"/library/metadata/{key}/refresh")
                 except PlexError as e:
                     stats["failed"] += 1
-                    self.log("warn", f"Plex: refresh {key} failed: {e}")
+                    emit(self.log, "warn", "plex.error", f"Plex: refresh {key} failed: {e}", op="refresh", key=key,
+                         error=str(e), traceback=traceback.format_exc())
                     continue
                 stats["refreshed"] += 1
                 self.db.execute(
                     f"UPDATE tracks SET plex_pending=0, updated_at=? WHERE id IN ({','.join('?' * len(ids))})",
                     (int(time.time()), *ids),
                 )
-            self.log(
-                "info",
+            emit(
+                self.log, "info", "plex.refresh",
                 f"Plex: refreshed {stats['refreshed']} {self.cfg.plex_refresh_level}(s), "
                 f"{stats['unknown']} file(s) not yet in Plex, {stats['failed']} failed",
+                refresh_level=self.cfg.plex_refresh_level, pending=len(rows), **stats,
             )
         except (PlexError, ET.ParseError) as e:
             self.ok, self.error = False, str(e)
-            self.log("warn", f"Plex: {e}; will retry next run")
+            emit(self.log, "warn", "plex.error", f"Plex: {e}; will retry next run", op="refresh_pending",
+                 error=str(e), traceback=traceback.format_exc())
         return stats

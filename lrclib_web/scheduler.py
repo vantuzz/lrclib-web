@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import threading
+import traceback
 from datetime import datetime
 
 from .cron import Cron, CronError
+from .diaglog import emit
 from .jobs import Busy, JobRunner
 
 
@@ -22,7 +24,7 @@ class Scheduler:
             try:
                 self.entries.append((Cron(expr), jtype, mode))
             except CronError as e:
-                log("error", f"{name}={expr!r} ignored: {e}")
+                emit(log, "error", "scheduler.config_error", f"{name}={expr!r} ignored: {e}", name=name, expr=expr)
         self._stop = threading.Event()
         self._last_minute: datetime | None = None
 
@@ -43,16 +45,24 @@ class Scheduler:
         for cron, jtype, mode in self.entries:
             if cron.matches(t):
                 try:
-                    self.runner.start(jtype, mode, trigger="schedule")
+                    job_id = self.runner.start(jtype, mode, trigger="schedule")
+                    emit(self.log, "info", "scheduler.fire", f"schedule {cron.expr}: started {jtype} {mode}",
+                         ui=False, cron=cron.expr, type=jtype, mode=mode, job_id=job_id)
                 except Busy:
-                    self.log("warn", f"schedule {cron.expr}: skipped ({jtype} {mode}), a job is running")
+                    emit(self.log, "warn", "scheduler.skipped",
+                         f"schedule {cron.expr}: skipped ({jtype} {mode}), a job is running",
+                         cron=cron.expr, type=jtype, mode=mode)
+
+    def _safe_tick(self) -> None:
+        try:
+            self.tick()
+        except Exception as e:  # noqa: BLE001
+            emit(self.log, "error", "scheduler.error", f"scheduler: {e}", error=f"{type(e).__name__}: {e}",
+                 traceback=traceback.format_exc())
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            try:
-                self.tick()
-            except Exception as e:  # noqa: BLE001
-                self.log("error", f"scheduler: {e}")
+            self._safe_tick()
             now = self.clock()
             self._stop.wait(max(1.0, 60 - now.second - now.microsecond / 1e6 + 0.5))
 

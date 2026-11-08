@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — diagnostics
+
+- Machine log: every event is also written as JSON Lines to `DATA_DIR/logs/app.jsonl` (5 x 5 MB rotation) with stable
+  event names, `run_id` per job run and full tracebacks; UI log and stdout stay unchanged. Debug-level events
+  (`lrclib.request`, `plex.request`, `tags.error`) only with `LOG_LEVEL=debug`
+- New events: `job.*`, `scan.summary`, `download.*`, `match.decision`, `write.*`, `lrclib.*`, `plex.*`,
+  `scheduler.*`, `http.error` / `http.5xx`, `thread.crash`, `app.start`
+- `POST /api/client-log`: the web UI reports JS errors, unhandled rejections, failed requests and event-stream drops
+  (rate limited, 16 KB cap) as `ui.error`
+- `GET /api/diag` and a "Download diagnostics" button: one JSON file with versions, redacted config, filesystem and
+  database summary, current status, recent events and errors of the last 7 days
+
 ## Unreleased — security hardening
 
 - File-operation guard: only `.lrc` / `.txt` sidecars and own temp files are created or deleted, paths must resolve

@@ -65,7 +65,7 @@ All settings are environment variables. Defaults shown are the built-in values.
 | `PLEX_INDEX_MAX_AGE_H` | `24` | Hours before the Plex track index cache is rebuilt |
 | `AUTH_USER` | `` | HTTP Basic auth user (auth is enabled only when `AUTH_PASS` is also set) |
 | `AUTH_PASS` | `` | HTTP Basic auth password |
-| `LOG_LEVEL` | `info` | Log verbosity |
+| `LOG_LEVEL` | `info` | Log verbosity; `debug` also records every LRCLIB/Plex request in the JSONL log |
 
 ## Security
 
@@ -136,6 +136,29 @@ shares) must still be able to: check them before applying this.
 
 The app never overwrites or deletes audio, but keep a backup of the library anyway: any process with write access
 to it is a risk. The database in `/config` holds only state that a full scan rebuilds; backing it up is optional.
+
+## Debugging and diagnostics
+
+Besides the human-readable log in the UI (and on stdout), every event is written as JSON Lines to
+`$DATA_DIR/logs/app.jsonl` (default `/config/logs/app.jsonl`; 5 files x 5 MB, rotated to `app.jsonl.1` ... `.4`).
+If the directory cannot be created the app runs without the file. One JSON object per line with `ts` (ISO 8601 with
+offset, ms), `level`, `event` (stable dotted name such as `job.start`, `job.finish`, `match.decision`, `write.ok`,
+`write.error`, `lrclib.request`, `scan.summary`, `plex.refresh`, `scheduler.fire`, `http.error`, `ui.error`), `msg`,
+`version`, `run_id` (shared by all events of one job run, `null` outside runs) and event-specific fields. Failures carry
+a full `traceback` field. Secrets and lyrics text are never logged.
+
+```
+grep '"event": "match.decision"' /config/logs/app.jsonl | tail
+jq -c 'select(.level=="error")' /config/logs/app.jsonl
+```
+
+Browser errors (JavaScript errors, failed requests, lost event stream) are reported to `POST /api/client-log` and
+appear as `ui.error` events.
+
+To get a bug report in one file, press the pulse-shaped **Download diagnostics** button next to *Download log* (or
+`GET /api/diag`). The JSON contains versions, the config with secrets masked, process uid/gid/umask, free space and
+filesystem of `MUSIC_DIR` and `DATA_DIR`, database counts, the last runs, the current job status, the last 2000
+events and the errors of the last 7 days. It needs the same login as the rest of the UI.
 
 ## Development
 
