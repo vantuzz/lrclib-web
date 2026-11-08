@@ -155,6 +155,27 @@
     if (!state.paused && state.stick) box.scrollTop = box.scrollHeight;
   }
 
+  function saveLog() {
+    var rows = $("log").children;
+    if (!rows.length) { toast("Log is empty"); return; }
+    var lines = [];
+    for (var i = 0; i < rows.length; i++) {
+      var t = rows[i].querySelector(".t");
+      var time = t ? t.textContent : "";
+      lines.push(time + " " + (rows[i].className || "info") + " " + rows[i].textContent.slice(time.length));
+    }
+    var d = new Date();
+    var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + "-" + pad(d.getHours()) + pad(d.getMinutes());
+    var url = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], { type: "text/plain" }));
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "lrclib-web-log-" + stamp + ".txt";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
   // ---- live data -------------------------------------------------------
   function setConn(ok) {
     var d = $("dot-lrclib");
@@ -196,6 +217,7 @@
     log.addEventListener("scroll", function () {
       state.stick = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
     });
+    $("btn-save-log").addEventListener("click", saveLog);
     $("btn-pause").addEventListener("click", function () {
       state.paused = !state.paused;
       this.textContent = state.paused ? "Resume" : "Pause";

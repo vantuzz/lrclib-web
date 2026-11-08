@@ -46,7 +46,15 @@
   </section>
 
   <section>
-    <h2>Log <button id="btn-pause" type="button" class="small">Pause</button></h2>
+    <h2>Log <span class="tools">
+      <button id="btn-save-log" type="button" class="small icon" aria-label="Download log" title="Download log">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>
+        </svg>
+      </button>
+      <button id="btn-pause" type="button" class="small">Pause</button>
+    </span></h2>
     <div id="log" class="log" role="log"></div>
   </section>
 </main>
