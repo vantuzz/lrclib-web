@@ -13,9 +13,15 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Ceilings (rough, not yet measured on a full library; README "Resource limits"):
     pids_limit: 64
     mem_limit: 256m
+    memswap_limit: 256m   # same as mem_limit = no swap: a leak ends in an OOM kill + restart, not a slow hang
     cpus: 1.0
+    # Priorities: only matter when the host is busy, then Plex and other containers go first
+    cpu_shares: 256       # default 1024
+    blkio_config:
+      weight: 100         # default 500; ignored with a warning if the kernel has no I/O weight support
     ports:
       # Bind to the host's LAN IP, not 0.0.0.0 (change the IP; change the left 8080 if the port is taken)
       - "192.168.1.10:8080:8080"
