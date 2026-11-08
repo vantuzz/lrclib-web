@@ -10,6 +10,7 @@ import os
 import platform
 import shutil
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -49,6 +50,7 @@ class JsonlSink:
         self.dropped = 0
         self._retry_at = 0.0
         self._failed = False
+        self._lock = threading.RLock()  # LogBus calls write() from several threads; the state below is shared
         self.handler = logging.handlers.RotatingFileHandler(
             self.path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8"
         )
@@ -67,6 +69,10 @@ class JsonlSink:
                   f"retry every {int(self.RETRY_S)} s", flush=True)
 
     def write(self, line: str) -> None:
+        with self._lock:
+            self._write(line)
+
+    def _write(self, line: str) -> None:
         if self.broken:
             if time.time() < self._retry_at:
                 self.dropped += 1
@@ -89,8 +95,9 @@ class JsonlSink:
             self.broken, self.broken_since = False, None
 
     def state(self) -> dict:
-        return {"path": self.path, "broken": self.broken, "broken_since": self.broken_since,
-                "last_error": self.last_error, "dropped_events": self.dropped}
+        with self._lock:
+            return {"path": self.path, "broken": self.broken, "broken_since": self.broken_since,
+                    "last_error": self.last_error, "dropped_events": self.dropped}
 
     def paths(self) -> list[str]:
         """Existing log files, oldest first."""

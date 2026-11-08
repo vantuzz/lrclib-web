@@ -2,7 +2,10 @@
 
 ## Unreleased — review fixes
 
-- A crash in a background thread also prints the full traceback to stderr (`docker logs`), not only to the JSONL file
+- A crash in a background thread also prints the full traceback to stderr (`docker logs`), not only to the JSONL file;
+  the structured event is written first, and a broken stderr cannot stop it
+- JSONL log writes are serialised by a lock: several threads failing at once no longer report a false recovery or
+  undercount lost events
 - JSONL log: a write error (disk full, unwritable dir) pauses the file log and retries every 60 s instead of
   disabling it until restart; `/api/diag` has a `log_sink` section (broken, since, last error, lost events)
 - `/api/client-log`: server-side limit of 30 reports per 10 minutes (HTTP 429 above it); the next accepted report

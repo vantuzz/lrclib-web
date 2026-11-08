@@ -218,3 +218,36 @@ def test_write_failure_is_retried_and_logging_resumes(bus, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert out.count("cannot write") == 1 and "writable again; 3 event(s) lost" in out
     assert sink.state()["dropped_events"] == 3
+
+
+def test_concurrent_failing_writes_are_all_counted_and_never_reported_as_recovered(bus, capsys, monkeypatch):
+    import threading
+    import time
+
+    sink = bus.sink
+
+    def boom(record):
+        time.sleep(0.002)  # another writer reaches this point while the first one checks its result
+        raise OSError(28, "No space left on device")
+
+    on_error = sink._on_error
+
+    def slow_on_error(*a, **kw):
+        on_error(*a, **kw)
+        time.sleep(0.001)  # widen the window between recording a failure and checking it
+
+    monkeypatch.setattr(sink.handler, "emit", boom)
+    monkeypatch.setattr(sink, "_on_error", slow_on_error)
+    monkeypatch.setattr(sink, "RETRY_S", 0.0)  # every write is a real retry that fails
+
+    def worker():
+        for _ in range(20):
+            sink.write("{}")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sink.broken and sink.dropped == 8 * 20
+    assert "writable again" not in capsys.readouterr().out
