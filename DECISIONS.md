@@ -18,3 +18,8 @@
 17. Run budget (review #6): optional RUN_MAX_MINUTES, off by default; the download step stops cleanly, the next run continues.
 18. Terminal states (review #12): re-check `instrumental` after 90 days; if a .lrc we wrote disappears, move synced -> pending once (no loop).
 19. not_found/rejected re-check (review #13): escalate 14 -> 28 -> 56 -> 180 days; reset when the audio file changes.
+20. Security review (2026-11-08): the app needs read of audio content (tags, duration) and directory write in MUSIC_DIR (sidecars); delete is allowed for lyrics only. Phase "security hardening" = items 21-23, one PR, no host changes.
+21. File-operation guard in code: create/delete only `.lrc`, `.txt` and own `.<name>.tmp-<pid>` files; resolved path must stay inside MUSIC_DIR (realpath); tmp opened with O_EXCL|O_NOFOLLOW; drop the `os.replace` fallback that can clobber (no-hard-link FS: create target with O_EXCL instead). Tests for each rule.
+22. PLEX_TOKEN optional: Plex is enabled by PLEX_URL alone, so a gateway (haproxy `mode http`) can inject X-Plex-Token and allow only GET /identity, GET /library/sections, GET /library/sections/{id}/all, GET /library/sections/{id}/refresh, PUT /library/metadata/{id}/refresh. README: example haproxy.cfg with these ACLs.
+23. Container hardening defaults: compose.example.yml gets read_only, tmpfs /tmp, cap_drop ALL, no-new-privileges, pids/memory/cpu limits, port bound to a LAN IP; README "Security" section incl. optional sticky-bit + separate UID recipe (manual, owner's choice) and backups. Verify `--read-only` works on Unraid.
+Deferred: pin base image digest + tagged releases; strict egress (internal network + allowlist proxy); sticky bit on the library (owner decides separately).
