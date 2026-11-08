@@ -5,8 +5,77 @@
   var STATUS_ORDER = ["synced", "plain", "has_lrc", "not_found", "rejected", "instrumental",
     "untagged", "error", "pending", "missing"];
   var LABELS = { has_lrc: "has .lrc", not_found: "not found" };
-  var state = { paused: false, stick: true, lastLogId: 0, cooldownUntil: 0 };
+  var state = { paused: false, stick: true, lastLogId: 0, cooldownUntil: 0, job: null, busy: false };
   var toastTimer = 0;
+
+  // ---- error reporting (POST /api/client-log -> "ui.error" in the server's JSONL log) ----------------------
+  // Must never throw or loop: it uses the original fetch, swallows every failure and is rate limited.
+  var rawFetch = window.fetch ? window.fetch.bind(window) : null;
+  var MAX_REPORTS = 20, SAME_KEY_MS = 30000;
+  var reportCount = 0, reportLast = {}, appVersion = "", sseState = "none";
+
+  function snapshot() {
+    var j = state.job;
+    return {
+      job: j ? { id: j.id, type: j.type, state: j.state, phase: j.phase, done: j.done, total: j.total } : null,
+      busy: !!state.busy,
+      lastLogId: state.lastLogId,
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+      userAgent: navigator.userAgent,
+      version: appVersion,
+      sse: sseState,
+      online: navigator.onLine
+    };
+  }
+
+  function report(kind, message, stack, key) {
+    try {
+      if (!rawFetch || reportCount >= MAX_REPORTS) return;
+      var k = key || kind + ":" + String(message).slice(0, 80);
+      var now = Date.now();
+      if (reportLast[k] && now - reportLast[k] < SAME_KEY_MS) return;
+      reportLast[k] = now;
+      reportCount++;
+      var body = JSON.stringify({
+        kind: kind,
+        message: String(message).slice(0, 1000),
+        stack: stack ? String(stack).slice(0, 4000) : "",
+        url: location.href.slice(0, 300),
+        state: snapshot()
+      });
+      if (body.length > 15000) body = JSON.stringify({ kind: kind, message: String(message).slice(0, 1000) });
+      rawFetch("/api/client-log", {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive: true,
+        headers: { "Content-Type": "application/json", "X-Requested-With": "lrclib-web" },
+        body: body
+      }).catch(function () { /* the report itself failed: give up silently */ });
+    } catch (x) { /* never throw from the reporter */ }
+  }
+
+  window.addEventListener("error", function (e) {
+    report("window.onerror", e.message || "error",
+      (e.error && e.error.stack) || (e.filename ? e.filename + ":" + e.lineno + ":" + e.colno : ""));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e.reason;
+    report("unhandledrejection", (r && r.message) || String(r), r && r.stack);
+  });
+  if (rawFetch) {
+    window.fetch = function (input, init) {
+      var url = typeof input === "string" ? input : (input && input.url) || "";
+      var p = rawFetch(input, init);
+      if (url.indexOf("/api/client-log") < 0) {
+        p.then(function (r) {
+          if (!r.ok && r.status !== 409) report("fetch", "HTTP " + r.status + " " + url, "", "fetch:" + url + ":" + r.status);
+        }, function (err) {
+          report("fetch", "network error " + url + ": " + (err && err.message), err && err.stack, "fetch:" + url + ":net");
+        });
+      }
+      return p;
+    };
+  }
 
   function fmtNum(n) {
     return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
@@ -139,6 +208,9 @@
   }
 
   function applyStatus(s) {
+    state.job = s.job || null;
+    state.busy = !!s.busy;
+    if (s.version) appVersion = s.version;
     renderHeader(s); renderLibrary(s); renderJob(s); renderSchedule(s);
   }
 
@@ -166,14 +238,33 @@
     }
     var d = new Date();
     var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + "-" + pad(d.getHours()) + pad(d.getMinutes());
-    var url = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], { type: "text/plain" }));
+    saveBlob(new Blob([lines.join("\n") + "\n"], { type: "text/plain" }), "lrclib-web-log-" + stamp + ".txt");
+  }
+
+  function saveBlob(blob, name) {
+    var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href = url;
-    a.download = "lrclib-web-log-" + stamp + ".txt";
+    a.download = name;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function saveDiag() {
+    var btn = $("btn-diag");
+    btn.disabled = true;
+    fetch("/api/diag", { credentials: "same-origin" }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      var cd = r.headers.get("Content-Disposition") || "";
+      var m = /filename="?([^";]+)"?/.exec(cd);
+      return r.blob().then(function (b) { return { blob: b, name: m ? m[1] : "lrclib-web-diag.json" }; });
+    }).then(function (res) {
+      saveBlob(res.blob, res.name);
+    }).catch(function (e) {
+      toast("Diagnostics failed: " + e.message);
+    }).then(function () { btn.disabled = false; });
   }
 
   // ---- live data -------------------------------------------------------
@@ -200,8 +291,12 @@
 
   function startSSE() {
     var es = new EventSource("/api/events");
-    es.onopen = function () { setConn(true); };
-    es.onerror = function () { setConn(false); };
+    es.onopen = function () { sseState = "open"; setConn(true); };
+    es.onerror = function () {
+      sseState = es.readyState === 2 ? "closed" : "reconnecting";
+      setConn(false);
+      report("sse", "EventSource error (readyState " + es.readyState + ")", "", "sse");
+    };
     es.addEventListener("status", function (e) {
       setConn(true);
       try { applyStatus(JSON.parse(e.data)); } catch (x) { /* ignore malformed */ }
@@ -218,6 +313,7 @@
       state.stick = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
     });
     $("btn-save-log").addEventListener("click", saveLog);
+    $("btn-diag").addEventListener("click", saveDiag);
     $("btn-pause").addEventListener("click", function () {
       state.paused = !state.paused;
       this.textContent = state.paused ? "Resume" : "Pause";

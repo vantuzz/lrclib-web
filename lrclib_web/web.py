@@ -7,16 +7,19 @@ import hmac
 import json
 import os
 import time
+import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import __version__
 from .config import Config
 from .db import DB
+from .diaglog import build_diag, diag_filename, emit
 from .jobs import Busy, JobRunner, LogBus
 from .plex import Plex
 from .scheduler import Scheduler
 
+CLIENT_LOG_MAX = 16 * 1024  # POST /api/client-log body cap
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
@@ -65,6 +68,9 @@ def make_handler(app: App):
 
         # -- helpers -------------------------------------------------------
         def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
+            if code >= 500:
+                emit(app.log, "warn", "http.5xx", f"HTTP {code} on {self.command} {self.path.split('?', 1)[0]}",
+                     ui=False, method=self.command, path=self.path.split("?", 1)[0], status=code)
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -115,11 +121,32 @@ def make_handler(app: App):
             except (ValueError, UnicodeDecodeError):
                 return {}
 
+        def _guard(self, fn) -> None:
+            """Run a route; an unexpected crash is logged with its traceback and answered with a JSON 500."""
+            try:
+                fn()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                return
+            except Exception as e:  # noqa: BLE001
+                emit(app.log, "error", "http.error", f"{self.command} {self.path.split('?', 1)[0]} crashed: "
+                     f"{type(e).__name__}: {e}", ui=False, method=self.command, path=self.path.split("?", 1)[0],
+                     error=f"{type(e).__name__}: {e}", traceback=traceback.format_exc())
+                try:
+                    self._json(500, {"error": "internal error"})
+                except Exception:  # noqa: BLE001 - headers may already be on the wire
+                    self.close_connection = True
+
         # -- routes --------------------------------------------------------
         def do_HEAD(self):
-            self.do_GET()
+            self._guard(self._get)
 
         def do_GET(self):
+            self._guard(self._get)
+
+        def do_POST(self):
+            self._guard(self._post)
+
+        def _get(self):
             url = urllib.parse.urlsplit(self.path)
             path, qs = url.path, urllib.parse.parse_qs(url.query)
             if path == "/healthz":
@@ -139,16 +166,53 @@ def make_handler(app: App):
                 since = int((qs.get("since") or ["0"])[0] or 0)
                 limit = min(2000, int((qs.get("limit") or ["500"])[0] or 500))
                 return self._json(200, {"lines": app.log.since(since, limit)})
+            if path == "/api/diag":
+                body = json.dumps(build_diag(app), ensure_ascii=False, default=str).encode("utf-8")
+                return self._send(200, body, "application/json; charset=utf-8",
+                                  {"Content-Disposition": f'attachment; filename="{diag_filename()}"'})
             if path == "/api/events":
                 return self._events()
             self._json(404, {"error": "not found"})
 
-        def do_POST(self):
+        def _client_log(self):
+            """Browser-side error report -> ui.error event in the JSONL log."""
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = 0
+            if n > CLIENT_LOG_MAX:
+                self.close_connection = True  # the oversized body stays unread
+                return self._send(413, b'{"error": "report too large"}', "application/json; charset=utf-8",
+                                  {"Connection": "close"})
+            if n <= 0:
+                return self._json(400, {"error": "empty body"})
+            try:
+                b = json.loads(self.rfile.read(n).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return self._json(400, {"error": "invalid JSON"})
+            if not isinstance(b, dict):
+                return self._json(400, {"error": "expected an object"})
+
+            def s(key: str, limit: int) -> str:
+                v = b.get(key)
+                return v[:limit] if isinstance(v, str) else ("" if v is None else str(v)[:limit])
+
+            state = b.get("state")
+            client = {"kind": s("kind", 64), "message": s("message", 2000), "stack": s("stack", 8000),
+                      "url": s("url", 500), "state": state if isinstance(state, dict) else None,
+                      "user_agent": (self.headers.get("User-Agent") or "")[:300]}
+            emit(app.log, "error", "ui.error", f"UI {client['kind'] or 'error'}: {client['message']}"[:300],
+                 ui=False, client=client)
+            self._json(200, {"ok": True})
+
+        def _post(self):
             path = urllib.parse.urlsplit(self.path).path
             if not self._authorized():
                 return self._deny()
             if not self._csrf_ok():
                 return self._json(403, {"error": "missing X-Requested-With or cross-origin request"})
+            if path == "/api/client-log":
+                return self._client_log()
             if path == "/api/jobs":
                 b = self._body()
                 try:
