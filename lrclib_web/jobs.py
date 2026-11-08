@@ -22,7 +22,15 @@ try:  # POSIX only; on Windows the download lock is skipped
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from .writer import PermanentWriteError, WriteSkipped, sha256_text, sidecar_path, write_sidecar
+from .writer import (
+    PermanentWriteError,
+    UnsafePathError,
+    WriteSkipped,
+    remove_sidecar,
+    sha256_text,
+    sidecar_path,
+    write_sidecar,
+)
 
 DAY = 86400
 PERMANENT_RETRY_DAYS = 90  # "permanent" errors are retried after this long, not never
@@ -322,7 +330,7 @@ class JobRunner:
             if vanished():
                 return
             try:
-                sha = write_sidecar(target, text)
+                sha = write_sidecar(target, text, cfg.music_dir)
             except WriteSkipped:
                 upd.update(status="has_lrc", reason=".lrc exists", lrc_exists=1)
                 c["skipped"] += 1
@@ -348,11 +356,13 @@ class JobRunner:
                         with open(txt, "rb") as f:
                             current = hashlib.sha256(f.read()).hexdigest()
                         if current == row["written_sha256"]:
-                            os.unlink(txt)
+                            remove_sidecar(txt, cfg.music_dir)
                             upd["txt_exists"] = 0
                             self.log("info", f"      {label}: removed our .txt (TXT_ON_SYNCED=delete)")
                         else:
                             self.log("info", f"      {label}: txt modified locally, kept")
+                    except UnsafePathError as e:
+                        self.log("error", f"error {label}: {e}")
                     except OSError:
                         pass
         elif m.kind == "plain":
@@ -366,7 +376,7 @@ class JobRunner:
                 if vanished():
                     return
                 try:
-                    sha = write_sidecar(target, m.lyrics or "")
+                    sha = write_sidecar(target, m.lyrics or "", cfg.music_dir)
                 except WriteSkipped:
                     upd.update(reason="txt exists", txt_exists=1)
                     c["plain"] += 1

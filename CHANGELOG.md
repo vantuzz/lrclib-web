@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — security hardening
+
+- File-operation guard: only `.lrc` / `.txt` sidecars and own temp files are created or deleted, paths must resolve
+  inside `MUSIC_DIR`, temp files open with `O_EXCL|O_NOFOLLOW`; the no-hard-link fallback creates the target with
+  `O_EXCL` instead of `os.replace` (never clobbers)
+- `PLEX_TOKEN` is optional: `PLEX_URL` alone enables Plex, so a gateway can inject the token; README has an example
+  haproxy config that allows only the five Plex requests the app makes
+- `compose.example.yml`: read-only root fs, `tmpfs /tmp`, `cap_drop: ALL`, `no-new-privileges`, pids/memory/CPU
+  limits, port bound to a LAN IP, `/config` on `/mnt/cache`
+- README "Security" section: threat model, Plex gateway, optional sticky-bit + separate UID recipe, backups
+
 ## 0.1.0 — unreleased
 
 - Library scan in quick and full modes

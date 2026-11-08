@@ -25,7 +25,8 @@ Mobile-first single page: library scan, lyrics download with live log, nightly s
    docker compose up -d
    ```
 
-4. Open `http://<host>:8080` in a browser (change the left side of `8080:8080` if the port is taken).
+4. Open `http://<host>:8080` in a browser. The example binds the port to one LAN IP (`192.168.1.10:8080:8080`);
+   change the IP to your host's, and the middle `8080` if the port is taken.
 
 ## Configuration
 
@@ -55,8 +56,8 @@ All settings are environment variables. Defaults shown are the built-in values.
 | `TXT_ON_SYNCED` | `keep` | `keep` or `delete` our `.txt` when a `.lrc` is written later |
 | `UMASK` | `022` | File creation umask, applied at startup |
 | `WARN_PLEX_PATH_LEN` | `255` | Warn when the Plex-side path is longer than this |
-| `PLEX_URL` | `` | Plex server URL (needs `PLEX_TOKEN` too) |
-| `PLEX_TOKEN` | `` | Plex token (needs `PLEX_URL` too) |
+| `PLEX_URL` | `` | Plex server URL; setting it enables Plex refresh |
+| `PLEX_TOKEN` | `` | Plex token; optional when a gateway injects it (see Security) |
 | `PLEX_SECTION_ID` | `` (auto) | Plex music library section ID |
 | `PLEX_PATH_MAP` | `` | Container-to-Plex path mapping, e.g. `/music=/mnt/user/Music` (`;`-separated) |
 | `PLEX_REFRESH_LEVEL` | `artist` | Plex refresh scope: `artist` or `album` |
@@ -65,6 +66,76 @@ All settings are environment variables. Defaults shown are the built-in values.
 | `AUTH_USER` | `` | HTTP Basic auth user (auth is enabled only when `AUTH_PASS` is also set) |
 | `AUTH_PASS` | `` | HTTP Basic auth password |
 | `LOG_LEVEL` | `info` | Log verbosity |
+
+## Security
+
+What the app touches: it reads audio files (tags, duration) under `/music`, creates `.lrc` / `.txt` files next to
+them and may delete only its own `.txt` (`TXT_ON_SYNCED=delete`). The code enforces this (DECISIONS.md D21): it
+creates or deletes only `.lrc`, `.txt` and its own `.<name>.tmp-<pid>` files, refuses any path that resolves
+outside `MUSIC_DIR`, never follows a symlink at the final path component, and never overwrites an existing file.
+Its only other writes go to `/config` (SQLite database). Outbound traffic: LRCLIB and, if enabled, Plex.
+
+### Container hardening
+
+`compose.example.yml` runs the container with a read-only root filesystem (`read_only`, `tmpfs /tmp`), all Linux
+capabilities dropped, `no-new-privileges`, pids/memory/CPU limits and the web port bound to one LAN IP. Keep these
+unless something breaks; if the container fails to start with `read_only: true`, report it as a bug. Set
+`AUTH_USER` / `AUTH_PASS` if other people share your LAN, and do not expose the port to the internet.
+
+### Plex through a gateway
+
+With `PLEX_TOKEN` in the container, a leak gives full control of the Plex server. Instead, put a small HTTP proxy
+in front of Plex that adds the token and allows only the requests this app makes, and set only `PLEX_URL` to the
+proxy. Example `haproxy.cfg` (run haproxy with `PLEX_TOKEN` in its environment; change the Plex address):
+
+```
+defaults
+    mode http
+    timeout connect 5s
+    timeout client 60s
+    timeout server 60s
+
+frontend plex_api
+    bind :32400
+    acl m_get   method GET
+    acl m_put   method PUT
+    acl p_ident path /identity
+    acl p_secs  path /library/sections
+    acl p_all   path_reg ^/library/sections/[0-9]+/all$
+    acl p_scan  path_reg ^/library/sections/[0-9]+/refresh$
+    acl p_meta  path_reg ^/library/metadata/[0-9]+/refresh$
+    http-request deny unless m_get p_ident or m_get p_secs or m_get p_all or m_get p_scan or m_put p_meta
+    http-request set-header X-Plex-Token "${PLEX_TOKEN}"
+    default_backend plex
+
+backend plex
+    server plex 192.168.1.10:32400
+```
+
+Put the gateway and lrclib-web on one Docker network and set `PLEX_URL: "http://<gateway name>:32400"`.
+
+### Optional: stop the app from deleting or changing audio (sticky bit + separate UID)
+
+The guard above lives in the app's code. To have the kernel enforce it as well, run the container as a dedicated
+user that can create files in the library folders but not change or delete files it does not own. This changes
+permissions on your whole library, so it is your choice and is not done for you. Sketch for Unraid (`users` = gid
+100, app user uid 1500):
+
+```
+# folders: group-writable with the sticky bit, so only a file's owner can delete or rename it
+find /mnt/user/Music -type d -exec chmod 1775 {} +
+# audio and other existing files: read-only for the group
+find /mnt/user/Music -type f -exec chmod 644 {} +
+```
+
+Then set `user: "1500:100"` in `compose.yml`. Files written earlier by uid 99 are no longer deletable by the app
+(`TXT_ON_SYNCED=delete` will log a failure for them). Other tools that write to the library (Lidarr, beets, file
+shares) must still be able to: check them before applying this.
+
+### Backups
+
+The app never overwrites or deletes audio, but keep a backup of the library anyway: any process with write access
+to it is a risk. The database in `/config` holds only state that a full scan rebuilds; backing it up is optional.
 
 ## Development
 

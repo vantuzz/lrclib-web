@@ -4,16 +4,30 @@ services:
     container_name: lrclib-web
     user: "99:100"
     restart: unless-stopped
+    # Hardening defaults (see README "Security"): the image needs no writable root fs, no capabilities
+    # and no privilege escalation; only /music (sidecars) and /config (database) are written.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
     ports:
-      - "8080:8080"
+      # Bind to the host's LAN IP, not 0.0.0.0 (change the IP; change the left 8080 if the port is taken)
+      - "192.168.1.10:8080:8080"
     volumes:
       - /mnt/user/Music:/music
-      - /mnt/user/appdata/lrclib-web:/config
+      - /mnt/cache/appdata/lrclib-web:/config
     environment:
       TZ: Europe/Kyiv
       SCHEDULE_CRON: "0 4 * * *"
       FULL_SCAN_CRON: "0 3 * * 0"
-      # Optional Plex metadata refresh (both PLEX_URL and PLEX_TOKEN are required):
+      # Optional Plex metadata refresh. PLEX_URL enables it; PLEX_TOKEN may be left out when a gateway
+      # in front of Plex injects the token (README "Plex through a gateway"):
       # PLEX_URL: "http://192.168.1.10:32400"
       # PLEX_TOKEN: "your-plex-token"
       # PLEX_PATH_MAP: "/music=/mnt/user/Music"

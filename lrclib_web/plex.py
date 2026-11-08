@@ -62,14 +62,16 @@ class Plex:
         url = self.cfg.plex_url + path
         if params:
             url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
-        h = {"X-Plex-Token": self.cfg.plex_token, "Accept": "application/xml"}
+        h = {"Accept": "application/xml"}
+        if self.cfg.plex_token:
+            h["X-Plex-Token"] = self.cfg.plex_token
         h.update(headers or {})
         try:
             status, body = self.transport(method, url, h, 30.0)
         except (urllib.error.URLError, OSError) as e:
             raise PlexError(f"connection failed: {getattr(e, 'reason', e)}") from None
         if status == 401:
-            raise PlexError("unauthorized (check PLEX_TOKEN)")
+            raise PlexError("unauthorized (check PLEX_TOKEN, or the token injected by your gateway)")
         if status >= 400:
             raise PlexError(f"HTTP {status} on {path}")
         return body
