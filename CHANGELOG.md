@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — resource priorities
+
+- `compose.example.yml`: low CPU and disk priority (`cpu_shares: 256`, `blkio_config.weight: 100`) so Plex and other
+  containers go first when the server is busy; `memswap_limit` equal to `mem_limit` (no swap: a leak ends in an OOM
+  kill and a restart instead of a slow hang). Memory/CPU/pids ceilings unchanged until measured on a full library
+- README "Resource limits": what each setting does, Unraid Extra Parameters equivalent, how to check limits and
+  whether they are hit
+
 ## Unreleased — diagnostics
 
 - Machine log: every event is also written as JSON Lines to `DATA_DIR/logs/app.jsonl` (5 x 5 MB rotation) with stable

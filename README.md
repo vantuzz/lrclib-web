@@ -82,6 +82,37 @@ capabilities dropped, `no-new-privileges`, pids/memory/CPU limits and the web po
 unless something breaks; if the container fails to start with `read_only: true`, report it as a bug. Set
 `AUTH_USER` / `AUTH_PASS` if other people share your LAN, and do not expose the port to the internet.
 
+### Resource limits
+
+The container should never slow down Plex or other services on the same server. `compose.example.yml` sets two
+kinds of limits:
+
+- **Priorities** (always useful, independent of library size): `cpu_shares: 256` (default 1024) and
+  `blkio_config.weight: 100` (default 500). They change nothing while the server is idle; when CPU or disks are
+  busy, other containers get them first, so a full scan waits instead of stalling Plex. The I/O weight works only
+  if the kernel supports it (BFQ scheduler / cgroup I/O weight); otherwise Docker prints a warning and ignores it.
+- **Ceilings**: `mem_limit: 256m` with `memswap_limit: 256m` (the same value means no swap), `cpus: 1.0`,
+  `pids_limit: 64`. On a memory leak the kernel kills the process at the limit, the container exits and
+  `restart: unless-stopped` starts it again; an interrupted job continues on the next run. Note that Docker does
+  not restart a container that is merely "unhealthy". These values are rough: a short test on ~34k tracks peaked
+  at 63 MiB, 5 pids and never hit the CPU limit, but a full scan and a long download run are not measured yet.
+
+Unraid template (no compose): put the same values into **Extra Parameters**:
+
+```
+--memory=256m --memory-swap=256m --cpus=1 --cpu-shares=256 --blkio-weight=100 --pids-limit=64
+```
+
+To check the limits are applied and whether the container ever hits them (replace the name):
+
+```bash
+docker inspect -f 'mem={{.HostConfig.Memory}} swap={{.HostConfig.MemorySwap}} cpus={{.HostConfig.NanoCpus}} shares={{.HostConfig.CpuShares}} blkio={{.HostConfig.BlkioWeight}} pids={{.HostConfig.PidsLimit}}' lrclib-web
+docker exec lrclib-web sh -c 'cd /sys/fs/cgroup; cat memory.peak; grep oom_kill memory.events; grep nr_throttled cpu.stat'
+```
+
+`oom_kill` above 0 means the memory ceiling was reached; a growing `nr_throttled` means the CPU ceiling slows the
+jobs. In either case raise the value or report it.
+
 ### Plex through a gateway
 
 With `PLEX_TOKEN` in the container, a leak gives full control of the Plex server. Instead, put a small HTTP proxy
