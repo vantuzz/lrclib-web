@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>lrclib-web</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<main>
+  <header>
+    <h1>lrclib-web</h1>
+    <span id="version" class="muted"></span>
+    <span class="dots">
+      <span class="dot-label">LRCLIB <i id="dot-lrclib" class="dot" title="Connecting"></i></span>
+      <span id="plex-wrap" class="dot-label" hidden>Plex <i id="dot-plex" class="dot"></i></span>
+    </span>
+  </header>
+
+  <section>
+    <h2>Library <span id="total" class="muted"></span></h2>
+    <div id="lib-chips" class="chips"></div>
+    <p id="last-scan" class="muted"></p>
+    <div class="btns">
+      <button id="btn-scan" type="button">Scan</button>
+      <button id="btn-full" type="button">Full scan</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Lyrics download</h2>
+    <p id="job-line">No job yet</p>
+    <progress id="bar" max="100" value="0"></progress>
+    <p class="muted"><span id="eta"></span> <span id="cooldown" class="badge" hidden></span></p>
+    <div id="job-chips" class="chips"></div>
+    <div class="btns">
+      <button id="btn-download" type="button">Download</button>
+      <button id="btn-run" type="button">Scan + Download</button>
+      <button id="btn-stop" type="button" class="danger">Stop</button>
+    </div>
+    <div id="schedule" class="muted"></div>
+    <h3>Last runs</h3>
+    <ul id="runs" class="runs"></ul>
+  </section>
+
+  <section>
+    <h2>Log <button id="btn-pause" type="button" class="small">Pause</button></h2>
+    <div id="log" class="log" role="log"></div>
+  </section>
+</main>
+<div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
