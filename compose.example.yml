@@ -1,0 +1,22 @@
+services:
+  lrclib-web:
+    image: ghcr.io/vantuzz/lrclib-web:latest
+    container_name: lrclib-web
+    user: "99:100"
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /mnt/user/Music:/music
+      - /mnt/user/appdata/lrclib-web:/config
+    environment:
+      TZ: Europe/Kyiv
+      SCHEDULE_CRON: "0 4 * * *"
+      FULL_SCAN_CRON: "0 3 * * 0"
+      # Optional Plex metadata refresh (both PLEX_URL and PLEX_TOKEN are required):
+      # PLEX_URL: "http://192.168.1.10:32400"
+      # PLEX_TOKEN: "your-plex-token"
+      # PLEX_PATH_MAP: "/music=/mnt/user/Music"
+      # Optional Basic auth (both AUTH_USER and AUTH_PASS are required):
+      # AUTH_USER: "admin"
+      # AUTH_PASS: "change-me"

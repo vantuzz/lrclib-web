@@ -3,6 +3,20 @@
 Binding product decisions: DECISIONS.md (D1..D10). Evidence tags: [docs Lnn] = /tmp/lr/docs.txt (LRCLIB API docs),
 [lrcget path:Lnn] = upstream LRCGET 2.2.2 source, [verified: url] = checked on the web, [assumption] = not verified.
 
+## MVP status (2026-11-08)
+
+Design changes from review, applied in the MVP code (they supersede the text below where it differs):
+
+1. Before writing any sidecar the audio file is re-checked; if it vanished, nothing is written and the track becomes `missing` (counted as skipped).
+2. No album -> both `/api/get` steps are skipped (LRCLIB requires `album_name`); an HTTP 400 on a get step falls through to the next step/search; "permanent" errors are retried after 90 days, not 10 years.
+3. No-clobber publish via `os.link` + unlink (fallback: exists-check + `os.replace` where hard links are unsupported); the download step holds an exclusive `<data_dir>/download.lock` (POSIX `flock`), a second process fails the job.
+4. A known directory that disappears gets its stored mtime cleared, so quick mode re-lists it (and restores its tracks) when it returns.
+5. Any directory stat/list error other than "not found" makes the scan incomplete: recorded in errors, no missing-marking for the whole run, mtime of that dir not stored.
+6. A directory's mtime is stored only if it is more than 2 s old (the stat is taken before listing), so same-second additions are not lost.
+7. The second `/api/get` (primary artist) and the primary-artist search happen only for an explicit feat-marker (`feat.`, `feat`, `ft.`, `featuring`, `;`); "Earth, Wind & Fire" is sent as is. Candidate matching (`same_artist`) still uses the broad separators.
+8. Adaptive pacing: each 429 doubles the request gap (cap 5 s), 20 consecutive successes halve it back to the configured gap; 503 without Retry-After backs off 1, 2, 4, 8, 16 s; Retry-After is also parsed in HTTP-date form.
+9. `TXT_ON_SYNCED=delete` removes our `.txt` only if its current sha256 equals the stored `written_sha256`; otherwise it is kept and logged.
+
 ## 1. Overview
 
 Single Python process in one container. Scans `/music`, keeps per-track state in SQLite under `/config`, queries LRCLIB
@@ -184,7 +198,7 @@ retries counts per request, not per attempt.
   via track status, so the next manual/scheduled run continues where it stopped. Optional RESUME_ON_START=true.
 - Scheduler thread: evaluates SCHEDULE_CRON (default `0 4 * * *`) once per minute in container TZ (`TZ` env, default
   UTC); starts `run`; skipped with a log line if busy; no catch-up for missed slots (container down) by default.
-  FULL_SCAN_CRON (default empty) starts `scan full`.
+  FULL_SCAN_CRON (default `0 3 * * 0`) starts `scan full`.
 - Progress model (in memory, pushed over SSE): `{job, phase, done, total, current, counters{synced,plain,not_found,
   rejected,instrumental,untagged,error,skipped}, cooldown_until, breaker_state, started_at, eta_s}`; ETA from moving
   average of per-track time.
@@ -268,7 +282,7 @@ Mobile layout (≤ 430 px wide, single column; wider screens just get margins):
 | PORT / BIND | `8080` / `0.0.0.0` | listener |
 | TZ | `UTC` | container time zone for schedule and UI times |
 | SCHEDULE_CRON | `0 4 * * *` | nightly `run` (quick scan + download + plex); empty disables |
-| FULL_SCAN_CRON | `` | optional full scan schedule (e.g. `0 3 * * 0`) |
+| FULL_SCAN_CRON | `0 3 * * 0` | full scan schedule (weekly, Sunday 03:00; D11); empty disables |
 | RESUME_ON_START | `false` | continue an interrupted job on boot |
 | FOLLOW_SYMLINKS | `false` | follow symlinked files/dirs during scan |
 | AUDIO_EXTENSIONS | `mp3,flac,m4a,…` | override list |
@@ -343,7 +357,7 @@ dates/ETag (D1), so content hashing is the only change signal; the plain re-chec
    artist metadata for large artists. Rec: ship `PLEX_REFRESH_LEVEL=artist` per D8, test on 2-3 artists, switch to `album`
    if equivalent. Requires PMS ≥ 1.41.6 for reliable local-lyrics pickup (PM-3185).
 4. Initial run of 50k tracks ≈ 8-10 h at ~0.6 s/request (+search fallbacks). Rec: accept (resumable); optionally add
-   RUN_MAX_MINUTES later; re-check ordering already puts new tracks first.
+   RUN_MAX_MINUTES (D17, done); re-check ordering already puts new tracks first.
 5. `.txt` left behind when `.lrc` is written later: Plex preference between `.lrc` and `.txt` unknown. Rec: default keep
    (TXT_ON_SYNCED=keep); flip to delete if Plex shows plain text.
 6. Untagged files are never looked up (no filename parsing). Rec: keep; expose count and a CSV export later.
